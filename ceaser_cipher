@@ -1,0 +1,196 @@
+
+
+
+import argparse
+import sys
+import string
+
+ALPHA_SIZE = 26
+
+# A rough English letter-frequency table (percent), used to score
+# candidate decryptions in brute-force / crack mode.
+ENGLISH_FREQ = {
+    'e': 12.70, 't': 9.06, 'a': 8.17, 'o': 7.51, 'i': 6.97, 'n': 6.75,
+    's': 6.33, 'h': 6.09, 'r': 5.99, 'd': 4.25, 'l': 4.03, 'c': 2.78,
+    'u': 2.76, 'm': 2.41, 'w': 2.36, 'f': 2.23, 'g': 2.02, 'y': 1.97,
+    'p': 1.93, 'b': 1.29, 'v': 0.98, 'k': 0.77, 'j': 0.15, 'x': 0.15,
+    'q': 0.10, 'z': 0.07,
+}
+
+COMMON_WORDS = {
+    "the", "and", "is", "to", "of", "in", "a", "that", "it", "you",
+    "for", "on", "with", "as", "at", "this", "be", "are", "or", "not",
+}
+
+
+# ───────────────────────────────
+# Caesar cipher (single shift)
+# ───────────────────────────────
+
+def caesar_shift(text: str, key: int) -> str:
+    """Shift every letter by `key` positions. Non-letters untouched."""
+    key = key % ALPHA_SIZE
+    result = []
+    for ch in text:
+        if ch.isupper():
+            result.append(chr((ord(ch) - ord('A') + key) % ALPHA_SIZE + ord('A')))
+        elif ch.islower():
+            result.append(chr((ord(ch) - ord('a') + key) % ALPHA_SIZE + ord('a')))
+        else:
+            result.append(ch)
+    return "".join(result)
+
+
+def caesar_encrypt(text: str, key: int) -> str:
+    return caesar_shift(text, key)
+
+
+def caesar_decrypt(text: str, key: int) -> str:
+    return caesar_shift(text, -key)
+
+
+# ───────────────────────────────
+# Vigenère cipher (keyword-based, repeating shift)
+# Harder to crack than Caesar because each letter can use a
+# different shift, so single-shift frequency analysis fails.
+# ───────────────────────────────
+
+def _vigenere_transform(text: str, keyword: str, encrypt: bool) -> str:
+    keyword = [c for c in keyword.lower() if c.isalpha()]
+    if not keyword:
+        raise ValueError("Vigenère key must contain at least one letter.")
+
+    result = []
+    key_index = 0
+    key_len = len(keyword)
+
+    for ch in text:
+        if ch.isalpha():
+            shift = ord(keyword[key_index % key_len]) - ord('a')
+            if not encrypt:
+                shift = -shift
+            base = ord('A') if ch.isupper() else ord('a')
+            result.append(chr((ord(ch) - base + shift) % ALPHA_SIZE + base))
+            key_index += 1
+        else:
+            result.append(ch)
+    return "".join(result)
+
+
+def vigenere_encrypt(text: str, keyword: str) -> str:
+    return _vigenere_transform(text, keyword, encrypt=True)
+
+
+def vigenere_decrypt(text: str, keyword: str) -> str:
+    return _vigenere_transform(text, keyword, encrypt=False)
+
+
+# ───────────────────────────────
+# Brute-force / cracking mode
+# ───────────────────────────────
+
+def english_score(text: str) -> float:
+    """Higher score = more likely to be real English.
+    Combines letter-frequency closeness with common-word hits."""
+    letters = [c.lower() for c in text if c.isalpha()]
+    if not letters:
+        return 0.0
+
+    total = len(letters)
+    freq_score = 0.0
+    for letter, expected_pct in ENGLISH_FREQ.items():
+        observed_pct = (letters.count(letter) / total) * 100
+        freq_score -= abs(observed_pct - expected_pct)  # closer = less penalty
+
+    words = text.lower().translate(str.maketrans("", "", string.punctuation)).split()
+    word_score = sum(1 for w in words if w in COMMON_WORDS) * 40
+
+    return freq_score + word_score
+
+
+def crack_caesar(ciphertext: str, top_n: int = 3):
+    """Try all 26 shifts, rank by how 'English' the result looks.
+
+    NOTE: chi-squared-style letter-frequency scoring is statistically
+    unreliable on very short strings (a handful of words) because the
+    sample size is too small to approximate English letter frequency.
+    It gets noticeably more accurate on paragraph-length ciphertext.
+    This is a known, explainable limitation -- not a bug."""
+    candidates = []
+    for key in range(ALPHA_SIZE):
+        guess = caesar_decrypt(ciphertext, key)
+        score = english_score(guess)
+        candidates.append((key, guess, score))
+    candidates.sort(key=lambda c: c[2], reverse=True)
+    return candidates[:top_n]
+
+
+# ───────────────────────────────
+# File helpers
+# ───────────────────────────────
+
+def read_text(args) -> str:
+    if args.message is not None:
+        return args.message
+    if args.file is not None:
+        with open(args.file, "r", encoding="utf-8") as f:
+            return f.read()
+    sys.exit("[ERROR] Provide -m/--message or -f/--file")
+
+
+def write_output(args, result: str):
+    if args.output:
+        with open(args.output, "w", encoding="utf-8") as f:
+            f.write(result)
+        print(f"[OK] Written to {args.output}")
+    else:
+        print(result)
+
+# CLI
+
+def build_parser():
+    p = argparse.ArgumentParser(description="Caesar & Vigenère Cipher Toolkit (Pro)")
+    sub = p.add_subparsers(dest="command", required=True)
+
+    def add_io_args(sp):
+        sp.add_argument("-m", "--message", help="Text to process")
+        sp.add_argument("-f", "--file", help="Read input from this file instead")
+        sp.add_argument("-o", "--output", help="Write result to this file instead of stdout")
+
+    for cmd in ("encrypt", "decrypt"):
+        sp = sub.add_parser(cmd, help=f"Caesar {cmd}")
+        add_io_args(sp)
+        sp.add_argument("-k", "--key", type=int, required=True, help="Integer shift key")
+
+    for cmd in ("vigenere-encrypt", "vigenere-decrypt"):
+        sp = sub.add_parser(cmd, help=f"Vigenère {cmd.split('-')[1]}")
+        add_io_args(sp)
+        sp.add_argument("-k", "--key", required=True, help="Keyword, e.g. LEMON")
+
+    sp = sub.add_parser("crack", help="Brute-force a Caesar-encrypted message")
+    add_io_args(sp)
+    sp.add_argument("-n", "--top", type=int, default=3, help="How many top guesses to show")
+
+    return p
+
+
+def main():
+    args = build_parser().parse_args()
+    text = read_text(args)
+
+    if args.command == "encrypt":
+        write_output(args, caesar_encrypt(text, args.key))
+    elif args.command == "decrypt":
+        write_output(args, caesar_decrypt(text, args.key))
+    elif args.command == "vigenere-encrypt":
+        write_output(args, vigenere_encrypt(text, args.key))
+    elif args.command == "vigenere-decrypt":
+        write_output(args, vigenere_decrypt(text, args.key))
+    elif args.command == "crack":
+        print(f"[INFO] Top {args.top} likely shifts for: {text!r}\n")
+        for key, guess, score in crack_caesar(text, args.top):
+            print(f"  shift={key:<3} score={score:7.2f}  ->  {guess}")
+
+
+if __name__ == "__main__":
+    main()
